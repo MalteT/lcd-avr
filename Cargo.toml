@@ -1,0 +1,13 @@
+[package]
+name = "lcd-avr-rust-example"
+version = "0.1.0"
+authors = ["Malte Tammena <malte.tammena@gmx.de>"]
+edition = "2018"
+
+[dependencies.atmega328p-hal]
+git = "https://github.com/Rahix/avr-hal.git"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
