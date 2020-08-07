@@ -1,18 +1,25 @@
-//! LCD communication library
+//! LCD communication library.
+//!
+//! This does not have production quality and there aren't even comments..
 
 use atmega328p_hal::{
-    atmega328p::PORTD,
-    clock,
     delay::Delay,
-    port::{mode::*, Pin},
+    port::{mode::*, portd, Pin},
     prelude::*,
 };
+use embedded_hal::digital::v2::{InputPin, OutputPin};
 
-const LCD_ENABLE_TIME_US: u16 = 1;
+use super::ClkSpeed;
+
+const LCD_ENABLE_TIME_US: u8 = 1;
+const LCD_TIME_BETWEEN_SCROLLING: u16 = 500;
 
 pub struct Lcd {
-    port: PORTD,
-    data_pins: [Pin<Output>; 8],
+    data_pin7: portd::PD7<Output>,
+    data_pin6: portd::PD6<Output>,
+    data_pin5: portd::PD5<Output>,
+    data_pin4: portd::PD4<Output>,
+    data_directions: portd::DDR,
     register_select: Pin<Output>,
     read_write: Pin<Output>,
     enable: Pin<Output>,
@@ -35,9 +42,7 @@ macro_rules! implement_lcd_instruction {
         } else {
             $lcd.read_write.set_low().expect("infallible");
         }
-        $lcd.port.ddrd.write(|w| unsafe { w.bits(0b11111111) });
-        $lcd.port.portd.write(|w| unsafe { w.bits($data) });
-        $lcd.trigger_enable();
+        $lcd.send_two_part_data($data);
     };
 }
 
@@ -85,14 +90,22 @@ pub enum DisplayOrCursor {
 
 impl Lcd {
     pub fn new(
-        port: PORTD,
+        data_pin7: portd::PD7<Output>,
+        data_pin6: portd::PD6<Output>,
+        data_pin5: portd::PD5<Output>,
+        data_pin4: portd::PD4<Output>,
+        data_directions: portd::DDR,
         register_select: Pin<Output>,
         read_write: Pin<Output>,
         enable: Pin<Output>,
         debug_led: Pin<Output>,
     ) -> Self {
         let mut lcd = Lcd {
-            port,
+            data_pin7,
+            data_pin6,
+            data_pin5,
+            data_pin4,
+            data_directions,
             register_select,
             read_write,
             enable,
@@ -102,7 +115,7 @@ impl Lcd {
         lcd.do_manual_init();
         // Setup
         lcd.set_function(DisplayLines::Single);
-        lcd.configure_display(DisplayState::On, Cursor::On, Blinking::Off);
+        lcd.configure_display(DisplayState::On, Cursor::Off, Blinking::Off);
         lcd.set_entry_mode(Direction::Right, DisplayShift::Off);
         // Return
         lcd
@@ -118,7 +131,7 @@ impl Lcd {
                 self.set_entry_mode(Direction::Right, DisplayShift::On);
             }
             if counter >= 16 {
-                Delay::<clock::MHz8>::new().delay_ms(700_u16);
+                Delay::<ClkSpeed>::new().delay_ms(LCD_TIME_BETWEEN_SCROLLING);
             }
             self.write_byte_to_display(*byte);
             counter += 1;
@@ -126,17 +139,22 @@ impl Lcd {
         self.set_entry_mode(Direction::Right, DisplayShift::Off);
     }
 
+    pub fn append_byte(&mut self, byte: u8) {
+        self.write_byte_to_display(byte);
+    }
+
     fn do_manual_init(&mut self) {
         self.register_select.set_low().expect("infallible");
         self.read_write.set_low().expect("infallible");
-        self.port.ddrd.write(|w| unsafe { w.bits(0b11111111) });
         // Wait 50ms for display activation
-        Delay::<clock::MHz8>::new().delay_ms(50_u16);
-        self.send_raw_byte(0b00110000);
-        Delay::<clock::MHz8>::new().delay_ms(5_u16);
-        self.send_raw_byte(0b00110000);
-        Delay::<clock::MHz8>::new().delay_us(150_u16);
-        self.send_raw_byte(0b00110000);
+        Delay::<ClkSpeed>::new().delay_ms(50_u16);
+        self.send_one_part_data(0b0011);
+        Delay::<ClkSpeed>::new().delay_ms(5_u16);
+        self.send_one_part_data(0b0011);
+        Delay::<ClkSpeed>::new().delay_us(150_u16);
+        self.send_one_part_data(0b0011);
+        // Enable 4 bit mode
+        self.send_one_part_data(0b0010);
     }
 
     pub fn clear_display(&mut self) {
@@ -148,7 +166,7 @@ impl Lcd {
     }
 
     pub fn set_function(&mut self, display_lines: DisplayLines) {
-        let byte = 0b00110000 | (display_lines as u8) << 3;
+        let byte = 0b00100000 | (display_lines as u8) << 3;
         implement_lcd_instruction!(self; 0, 0, byte);
     }
 
@@ -176,19 +194,13 @@ impl Lcd {
         implement_lcd_instruction!(self; 0, 0, byte);
     }
 
-    fn send_raw_byte(&mut self, byte: u8) {
-        self.register_select.set_low().expect("infallible");
-        self.read_write.set_low().expect("infallible");
-        self.port.ddrd.write(|w| unsafe { w.bits(0b11111111) });
-        self.port.portd.write(|w| unsafe { w.bits(byte) });
-        self.trigger_enable();
-    }
-
     fn wait_while_busy(&mut self) {
         self.debug_led.set_high().expect("infallible");
         // Configure pin 7 as input with connected pull-up
-        self.port.ddrd.write(|w| w.pd7().clear_bit());
-        self.port.portd.write(|w| w.pd7().set_bit());
+        // This should be safe, since I own this pin and I change it back before the end of this
+        // function. I might rething this once interrupts exist...
+        let pin7: portd::PD7<Output> = unsafe { ::core::mem::zeroed() };
+        let pin7 = pin7.into_pull_up_input(&self.data_directions);
         // Configure rs and rw
         self.register_select.set_low().expect("infallible");
         self.read_write.set_high().expect("infallible");
@@ -196,17 +208,19 @@ impl Lcd {
         let mut busy = true;
         while busy {
             self.enable.set_high().expect("infallible");
-            Delay::<clock::MHz8>::new().delay_us(LCD_ENABLE_TIME_US);
-            busy = self.port.pind.read().pd7().bit_is_set();
+            Delay::<ClkSpeed>::new().delay_us(LCD_ENABLE_TIME_US);
+            busy = pin7.is_high().expect("infallible");
             self.enable.set_low().expect("infallible");
+            // Skip the next 4 bit
+            self.trigger_enable();
         }
         self.debug_led.set_low().expect("infallible");
-        self.port.ddrd.write(|w| w.pd7().set_bit());
+        let _ = pin7.into_output(&self.data_directions);
     }
 
     fn trigger_enable(&mut self) {
         self.enable.set_high().expect("infallible");
-        Delay::<clock::MHz8>::new().delay_us(LCD_ENABLE_TIME_US);
+        Delay::<ClkSpeed>::new().delay_us(LCD_ENABLE_TIME_US);
         self.enable.set_low().expect("infallible");
     }
 
@@ -214,17 +228,37 @@ impl Lcd {
         self.wait_while_busy();
         self.register_select.set_high().expect("infallible");
         self.read_write.set_low().expect("infallible");
-        self.port.ddrd.write(|w| unsafe { w.bits(0b11111111) });
-        self.port.portd.write(|w| unsafe { w.bits(byte) });
-        self.trigger_enable();
+        self.send_two_part_data(byte);
     }
 
-    fn update_data_pins(&mut self, data: u8) {
-        let do_set_bit = |pin: &mut Pin<Output>, bit: u8| if bit == 0 {
-            pin.set_low()
-        } else {
-            pin.set_high()
-        };
+    fn send_two_part_data(&mut self, byte: u8) {
+        self.send_one_part_data((byte & 0b11110000) >> 4);
+        self.send_one_part_data(byte & 0b00001111);
+    }
 
+    fn send_one_part_data(&mut self, byte: u8) {
+        self.data_pin7.set(byte & 0b1000 != 0).expect("infallible");
+        self.data_pin6.set(byte & 0b0100 != 0).expect("infallible");
+        self.data_pin5.set(byte & 0b0010 != 0).expect("infallible");
+        self.data_pin4.set(byte & 0b0001 != 0).expect("infallible");
+        self.trigger_enable();
+    }
+}
+
+trait OutputPinExt {
+    type Error;
+    fn set(&mut self, state: bool) -> Result<(), Self::Error>;
+}
+
+impl<P> OutputPinExt for P
+where
+    P: OutputPin,
+{
+    type Error = <P as OutputPin>::Error;
+    fn set(&mut self, state: bool) -> Result<(), Self::Error> {
+        match state {
+            true => self.set_high(),
+            false => self.set_low(),
+        }
     }
 }

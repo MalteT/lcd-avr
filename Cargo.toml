@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["Malte Tammena <malte.tammena@gmx.de>"]
 edition = "2018"
 
+[dependencies]
+embedded-hal = "0.2.4"
+nb = "1.0.0"
+
 [dependencies.atmega328p-hal]
 git = "https://github.com/Rahix/avr-hal.git"
 

@@ -62,6 +62,8 @@ name = "lcd-avr-rust-example"
 version = "0.1.0"
 dependencies = [
  "atmega328p-hal",
+ "embedded-hal",
+ "nb 1.0.0",
 ]
 
 [[package]]
