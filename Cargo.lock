@@ -58,7 +58,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lcd-avr-rust-example"
+name = "lcd-avr"
 version = "0.1.0"
 dependencies = [
  "atmega328p-hal",
