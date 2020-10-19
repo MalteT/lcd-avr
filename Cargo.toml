@@ -11,6 +11,7 @@ nb = "1.0.0"
 
 [dependencies.atmega328p-hal]
 git = "https://github.com/Rahix/avr-hal.git"
+rev = "329ae376e0d2b44f6dfaaae12795d328248968f9"
 
 [profile.release]
 codegen-units = 1
